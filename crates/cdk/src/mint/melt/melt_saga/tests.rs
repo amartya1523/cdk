@@ -82,6 +82,34 @@ async fn test_onchain_setup_uses_selected_fee_option_for_balance() {
     assert_eq!(stored.fee_reserve().value(), 500);
 }
 
+/// Test: the immediate pending response of an onchain melt reports the fee
+/// option the request selected, as persisted by setup.
+#[tokio::test]
+async fn test_onchain_melt_pending_response_reports_selected_fee_option() {
+    let mint = create_test_mint().await.unwrap();
+    let quote = create_test_onchain_melt_quote(&mint).await;
+
+    // Select the second tier (fee_reserve 200) and fund exactly that.
+    let proofs = mint_test_proofs(&mint, Amount::from(9_200)).await.unwrap();
+    let melt_request = create_test_melt_request(&proofs, &quote).fee_index(1);
+
+    let pending = mint.melt(&melt_request).await.unwrap();
+    let response = match pending.pending_response() {
+        cdk_common::MeltQuoteResponse::Onchain(response) => response.clone(),
+        other => panic!("expected onchain melt response, got {other:?}"),
+    };
+    assert_eq!(response.state, MeltQuoteState::Pending);
+    assert_eq!(response.selected_fee_index, Some(1));
+
+    let stored = mint
+        .localstore()
+        .get_melt_quote(&quote.id)
+        .await
+        .unwrap()
+        .expect("quote must exist");
+    assert_eq!(stored.selected_fee_index, response.selected_fee_index);
+}
+
 #[tokio::test]
 async fn test_onchain_setup_rejects_amount_for_unselected_fee_option() {
     let mint = create_test_mint().await.unwrap();
