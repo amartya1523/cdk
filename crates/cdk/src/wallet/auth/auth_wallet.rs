@@ -706,6 +706,120 @@ mod tests {
         }
     }
 
+    /// OIDC provider whose token endpoint may or may not rotate the
+    /// refresh token.
+    #[derive(Debug)]
+    struct MockOidcTransport {
+        rotated_refresh_token: Option<String>,
+    }
+
+    #[async_trait]
+    impl cdk_common::auth::oidc::OidcHttpTransport for MockOidcTransport {
+        async fn get(
+            &self,
+            _url: &str,
+        ) -> Result<cdk_common::auth::oidc::OidcHttpResponse, cdk_common::HttpError> {
+            let config = serde_json::json!({
+                "jwks_uri": "https://idp.example.com/jwks",
+                "issuer": "https://idp.example.com",
+                "token_endpoint": "https://idp.example.com/token",
+                "device_authorization_endpoint": "https://idp.example.com/device",
+            });
+            Ok(cdk_common::auth::oidc::OidcHttpResponse::new(
+                200,
+                config.to_string().into_bytes(),
+            ))
+        }
+
+        async fn post_form(
+            &self,
+            _url: &str,
+            _params: Vec<(String, String)>,
+        ) -> Result<cdk_common::auth::oidc::OidcHttpResponse, cdk_common::HttpError> {
+            let mut token = serde_json::json!({
+                "access_token": "new-access-token",
+                "token_type": "Bearer",
+            });
+            if let Some(refresh_token) = &self.rotated_refresh_token {
+                token["refresh_token"] = serde_json::json!(refresh_token);
+            }
+            Ok(cdk_common::auth::oidc::OidcHttpResponse::new(
+                200,
+                token.to_string().into_bytes(),
+            ))
+        }
+    }
+
+    /// Mint connector that advertises NUT-21 clear auth.
+    #[derive(Debug)]
+    struct ClearAuthMintConnector;
+
+    #[async_trait]
+    impl AuthMintConnector for ClearAuthMintConnector {
+        async fn get_auth_token(&self) -> Result<AuthToken, Error> {
+            Ok(AuthToken::ClearAuth("dummy".to_string()))
+        }
+
+        async fn set_auth_token(&self, _: AuthToken) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn get_mint_info(&self) -> Result<MintInfo, Error> {
+            let mut info = MintInfo::default();
+            info.nuts.nut21 = Some(crate::nuts::nut21::Settings::new(
+                "https://idp.example.com/.well-known/openid-configuration".to_string(),
+                "cashu-client".to_string(),
+                vec![],
+            ));
+            Ok(info)
+        }
+
+        async fn get_mint_blind_auth_keyset(&self, _: Id) -> Result<KeySet, Error> {
+            Err(Error::UnknownKeySet)
+        }
+
+        async fn get_mint_blind_auth_keysets(&self) -> Result<KeysetResponse, Error> {
+            Ok(KeysetResponse { keysets: vec![] })
+        }
+
+        async fn post_mint_blind_auth(&self, _: MintAuthRequest) -> Result<MintResponse, Error> {
+            Err(Error::Custom("not used".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_refresh_token_when_provider_does_not_rotate_it() {
+        for (rotated, expected) in [
+            (None, "current-refresh-token"),
+            (Some("rotated-refresh-token"), "rotated-refresh-token"),
+        ] {
+            let wallet = auth_wallet_with_connector(Arc::new(ClearAuthMintConnector)).await;
+            wallet
+                .set_oidc_client(Some(OidcClient::with_transport(
+                    "https://idp.example.com/.well-known/openid-configuration".to_string(),
+                    Some("cashu-client".to_string()),
+                    Arc::new(MockOidcTransport {
+                        rotated_refresh_token: rotated.map(str::to_string),
+                    }),
+                )))
+                .await;
+            wallet
+                .set_refresh_token(Some("current-refresh-token".to_string()))
+                .await;
+
+            // The fake access token is not a valid CAT, so the refresh itself
+            // fails at verification; only the refresh token bookkeeping that
+            // happens before it is under test here.
+            let _ = wallet.refresh_access_token().await;
+
+            assert_eq!(
+                wallet.get_refresh_token().await.as_deref(),
+                Some(expected),
+                "rotated refresh token: {rotated:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn load_keyset_keys_returns_keys_for_requested_id() {
         let keyset_active = build_auth_keyset(1);
