@@ -186,8 +186,12 @@ impl AuthWallet {
                     )
                     .await?;
 
-                // Store new refresh token if provided
-                self.set_refresh_token(token_response.refresh_token).await;
+                // Store new refresh token if provided. The token endpoint may
+                // omit it when it does not rotate refresh tokens (RFC 6749
+                // section 6), in which case the current one stays valid.
+                if let Some(refresh_token) = token_response.refresh_token {
+                    self.set_refresh_token(Some(refresh_token)).await;
+                }
 
                 // Set new access token
                 self.set_auth_token(AuthToken::ClearAuth(token_response.access_token))
