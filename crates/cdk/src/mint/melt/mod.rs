@@ -956,6 +956,11 @@ impl Mint {
             .setup_melt(melt_request, verification, quote.payment_method.clone())
             .await?;
 
+        // `setup_melt` locks in the fee option an onchain melt selected
+        // (`selected_fee_index`, `fee_reserve`, `estimated_blocks`), so the
+        // pending response must come from the quote it persisted rather than
+        // the snapshot loaded before setup.
+        let setup_quote = setup_saga.lease_quote().clone();
         let mut lease = lease::MeltLease::owned(self.localstore.clone(), setup_saga.lease_quote());
         let melt_request_owned = melt_request.clone();
         let quote_id_for_log = quote_id.clone();
@@ -1111,7 +1116,7 @@ impl Mint {
         });
 
         // Return immediately with the quote in PENDING state and an awaitable completion future.
-        let mut quote_clone = quote.clone();
+        let mut quote_clone = setup_quote;
         quote_clone.state = MeltQuoteState::Pending;
         let response = quote_clone.into_response(None);
 
